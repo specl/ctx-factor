@@ -1,0 +1,158 @@
+---
+author: Jeff Rouder
+title: Fitting The Hierarchical Factor Model to a Synthetic Data Set
+output: pdf_document
+---
+
+This is a tutorial document to accompany *Hierarchical Factor Models For Analysis in Experimental Designs* by Rouder, Mehrvarz, and Stevenson.  It shows the steps needed to fit the hierarchical model:
+
+### Step 1: Get the needed libraries
+
+The following libraries need to be installed in R.
+
+- R2jags (the JAGS API we use here)
+- infinitefactor (for alignment)
+- abind (for array manipulation)
+- GPArotation (for rotations)
+
+
+
+### Step 2: Load Data.
+
+```{r}
+dat=read.table("run2Dat.txt",head=T)
+```
+
+Feel free to explore the data.  For example, the following code computes the observed effect for each person in each task and the correlations of these effects across tasks:
+
+```{r}
+mns=tapply(dat$y,list(dat$sub,dat$task,dat$cond),mean)
+effects=mns[,,2]-mns[,,1]
+corMat=cor(effects)
+```
+
+### Step 3: Specify The Model
+
+
+We have written the core model as `facH.mod` in the file `facMod.R`.  The JAGS specification is:
+
+```{r}
+facH.mod="
+model{
+  for (j in 1:J){
+    pTau2[j] ~ dgamma(.5, .5*pow(tuneTau,2))
+    mu[j]~dnorm(mu.m, pow(mu.s, -2))
+    pDelta2[j]~dgamma(.5,.5*pow(tuneDelta,2))}
+  for (d in 1:D){
+    for (j in 1:J){
+      lambda[j,d] ~ dnorm(0, pow(tuneLambda, -2))}
+    for (i in 1:I){
+      eta[i,d] ~ dnorm(0,1)}}
+    
+  for (i in 1:I){
+    for (j in 1:J){
+      for (d in 1:D){
+        temp[i,j,d] <- lambda[j,d]*eta[i,d]}
+      centerTheta[i,j] <- mu[j] + sum(temp[i,j,1:D])
+      theta[i,j] ~dnorm(centerTheta[i,j],pDelta2[j])
+      alpha[i,j] ~dnorm(alpha.m,pow(alpha.s, -2))}}
+  for (n in 1:N){
+    center[n] = alpha[sub[n],task[n]]+(cond[n]-1.5)*theta[sub[n],task[n]]
+    y[n] ~ dnorm(center[n], pTau2[task[n]])}
+}"
+```
+
+All that is needed to load this model is to run the above chunk or load it from the file `facMod.R`:
+
+```{r,include=F}
+source('facMod.R')
+```
+Just make sure `facH.R` is in your working directory.
+
+### Step 4: Specify the priors
+
+For RT tasks with contrasts, the following priors are informed but broad enough to include many treatment-control type subsecond RT experiments in psychology.  They are entered as a list called `priorRT`.
+
+```{r}
+priorRT=list(
+    "mu.m"=70,
+    "mu.s"=100,
+    "alpha.m"=1000,
+    "alpha.s"=1000,
+    "tuneDelta"=25,
+    "tuneLambda"=25,
+    "tuneTau"=200)
+```
+
+### Step 5: Run the model
+
+This step will take several minutes on your computer as the data are comprised of 320,000 trials and there are about 4000 parameters.  The function `facH.run` in `facMod.R` incorporates the prior and the data and calls the JAGS sampler.  The arguments are the data (`dat`), the number of factors, the priors, and the number of iterations.  Because the analysis takes several minutes, the output is saved.
+
+```{r}
+#output=facH.run(dat,numFactors = 2,prior=priorRT,M=5000)
+#saveRDS(file='synthExamp.RDS',object=output)
+```
+
+Here is the code for reading the saved output.
+```{r}
+output=readRDS('synthExamp.RDS')
+```
+
+### Step 5. Post sampling rotational alignment
+
+As discussed, MCMC iterations often correspond to different rotations and need to be aligned.  Poworoznek provides a R library `infinitefactor` that performed the alignment.  We have written a wrapper in our `R` file `facExtra.R`.  Here is how to do it:
+
+```{r}
+source('facExtra.R')
+samples=output$BUGSoutput$sims.list  #get MCMC samples
+aligned=align(samples)
+```
+
+The function `align` manipulated factor loadings and factor scores and passes all other parts of the chain.  Here is a histogram of the original samples and the aligned ones for $\lambda_{12}$:
+
+```{r}
+hist(samples$lambda[,1,2])
+hist(aligned$lambda[,1,2])
+```
+
+As a final courtesey, we sign-transform each dimension of factor loadings to be positive.  The function `makePositive()` in `facExtra` does this:
+
+```{r}
+alignPos=makePositive(aligned)
+```
+
+### Step 6.  Standardize the components
+
+You may choose to standardize your variance components.  The function `standardize()` in `facExtra.R` does the standardization:
+
+```{r}
+std=standardize(alignPos)
+```
+
+### Step 7.  Explore the posteriors.
+
+You can use `names()` to see what parameters are sampled and reported.  Of note is that `pDelta2` and `pTau2` are precisions not variances.  That is what the `p` is for.  
+
+```{r}
+names(std)
+```
+
+Lets look at the posterior factor loadings.  The dimensions are $4500\times 8 \times 2$ for 4500 iterations (after burn in), 8 tasks, and 2 dimensions.  The posterior means are had by averaging across iterations:
+
+```{r}
+dim(std$lambda)
+pmLambda=apply(std$lambda,2:3,mean)
+pmLambda
+```
+
+The standardized residuals (standard deviations) are
+```{r}
+pmDelta=apply(sqrt(std$delta2),2,mean)
+pmDelta
+```
+
+And the correlation matrix resulting from adding the components is:
+```{r}
+pmRho=apply(std$rho,2:3,mean)
+round(pmRho,2)
+```
