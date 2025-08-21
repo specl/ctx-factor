@@ -1,0 +1,966 @@
+---
+title             : "Hierarchical Factor Models For Experimental Designs"
+shorttitle        : "Factor Models For Experimental Designs"
+
+author: 
+  - name: Jeffrey N. Rouder
+    affiliation: "1"
+    corresponding: yes    # Define only one corresponding author
+    email: jrouder@uci.edu
+    address: Department of Cognitive Science, University of California, Irvine, CA, 92697
+  - name: Mahbod Mehrvarz
+    affiliation: "1"
+  - name: Niek Stevenson
+    affiliation: "2"
+
+affiliation       :
+  - id: 1
+    institution: University of California, Irvine
+  - id: 2
+    institution: University of Amsterdam
+
+authornote: |
+  Version 2, August, 2025.
+  
+  Author Contributions:   All three authors developed the models in collaboration.  JNR wrote much of the paper.  MM developed JAGS code and edited the paper.  NS implemented post-sampling alignment and edited the paper.
+  
+  Open Materials: All code and data for this paper are available at github.com/specl/ctx-factor.  The paper is a Rmarkdown document that is transparent.  When knitted, all text and equaltions are typeset, simulations are run, data are downloaded, analyses performed, and figures drawn.  Interested readers can start with p.Rmd and follow the code blocks therein.  Additionally, tutorials for analysis of the synthetic example and for the visual illusion data set may be found at https://github.com/specl/ctx-factor/tree/main/youCanDoIt.
+  
+  Support: JNR was supported by NSF 2126976 and by ONR N00014-23-1-2792.
+
+abstract          :  "It is challenging to study individual differences in experimental tasks because performance on these tasks is highly noise prone. This excessive noise if unaccounted results in attenuated correlations, overstated confidence, and increased residuals in factor models. One advantage in using experimental tasks is that they are comprised of many repeated trials allowing for a separate modeling of trial noise and individual variation. Here, we develop a set of hierarchical factor models for experimental tasks. We show that these models disattenuate correlations, provide for more clear assessments of factor structures, and have bona-fide measures of uncertainty for observed and latent variables. Attention is paid to computational issues including mixing and rotational ambiguity, and code is available for analysis in R with JAGS. The methods are illustrated through explorations of individual differences in two domains: visual illusions and cognitive control."  
+
+  
+keywords          : "Factor Models, Hierarchical Models, Cognitive Control, Illusions, Mixed Models, Bayesian Analysis"
+
+bibliography      : ["zlab.bib"]
+figsintext        : no
+figurelist        : no
+tablelist         : no
+footnotelist      : no
+lineno            : no
+
+
+class             : "man"
+header-includes:
+   - \usepackage{bm}
+   - \usepackage{pcl}
+   - \usepackage{amsmath}
+   - \usepackage{setspace}
+output            : papaja::apa6_pdf
+
+csl               : apa6.csl
+---
+
+```{r}
+knitr::opts_chunk$set(
+  echo = FALSE, 
+  message=FALSE, 
+  warning = FALSE)
+```  
+
+```{r}
+library(papaja)
+library(mvtnorm)
+library(corrplot)
+library(lavaan)
+library(mvtnorm)
+library(MCMCpack)
+library(shape)
+library(abind)
+```
+
+
+
+In his presidential address to the American Psychological Association, Lee Cronbach proposed a merger of sorts between experimental psychology and correlational psychology [@Cronbach.1957].  Indeed, in many ways we have seen this merger as it is now popular to study individual differences in cognitive experimental tasks.  By understanding how individuals' performance covaries across these tasks, it is perhaps possible to uncover an underlying latent structure of cognitive processing.  A classic example in cognitive control comes from @Miyake.etal.2000, who used latent-variable models to decompose individual differences in cognitive-control tasks into the three factors of inhibition, shifting, and updating.  In today's psychological science, it is common to see latent-variable analyses of tasks that are comprised of many repeated trials.   Examples come from fields as diverse as development [e.g., @Snyder.etal.2021], brain imaging [e.g., @Bolt.etal.2017], aging [@Kim-Spoon.etal.2021], and clinical pathology [@Green.etal.2012].  
+
+Here is the usual data-analytic pipeline:  **First**, individuals complete a battery of tasks.  In the study of executive function, examples of tasks include  the Stroop task [@Stroop.1935], the flanker task [@Eriksen.Eriksen.1974], and the antisaccade task [@Kane.etal.2001] among many others.  These experimental tasks are comprised of many repeated trials per condition.  **Second**, observations from repeated  trials are aggregated into a single score per individual per task.  The usual way of computing the score is to take either a sample mean or a sample contrast.  For example, in a Stroop task, the score is the mean difference in response time between conflict (incongruent) and non-conflict (congruent) conditions.  We will call this the *take-the-mean* approach, and it is prevalent, perhaps ubiquitous, in application.  **Third**, The matrix of scores per individual across tasks serves as input for computing the correlation among the tasks.  **Fourth,** Task covariation is decomposed into latent variables in a structural-equation model  [@Bollen.1989;@Skrondal.Rabe-Hesketh.2004].  It is the relations among these latent variables that hopefully reveal the underlying structure of cognitive processes.   The usual pipeline with take-the-mean scores is shown in Figure \ref{fig:usual}.
+
+```{r usual,fig.cap="Usual data-analytic pipeline: A. The raw data are tabulated into individual scores by taking the mean across repeated obsercations. B. The correlation among these individual scores may be computed C. These correlations may be decomposed with structural equation models.", out.width="5in"}
+knitr::include_graphics("dataAnalysis.jpg",dpi=100)
+```
+
+## Attenuation of Correlations, Overconfidence in Bad Ansewrs
+
+Although this usual approach is common, the results with experimental tasks have been beset with problems. First, experimental tasks are unreliable as measures of individual differences [@Enkavi.etal.2019;@Hedge.etal.2018;@Karr.etal.2018;@Franco-Martinez.etal.2024;@Vadillo.etal.2022].  Values of split-half reliability are often below .5 in value.  Second, several tasks that purportedly measure the same construct do not correlate well.  For example, the correlation between flanker and Stroop effects in large studies is often near .1 and rarely greater than .25 [@Enkavi.etal.2019;@Rey-Mermet.etal.2018;@Rouder.etal.2023a].  Third, latent-variable decomposition in cognitive-control domains seems unreplicable.  This lack of replicability is showcased by @Karr.etal.2018 who found that latent-variable analysis with simulated data infrequently recovered the generating model when the sample sizes and parameter values used in the simulations came from extant studies.
+
+These problems in practice reflect a statistical flaw in the usual approach with take-the-mean approach.  The resulting estimates of correlation are statistically inconsistent.  Figure \ref{fig:problem} shows why.  Figure \ref{fig:problem}A shows a scatter plot for 200 hypothetical individuals on two tasks.  Plotted are *true scores.*  True scores are the ideal and would be obtained if we had an unlimited number of trials per individual per task.  There is a healthy correlation of .5 in value.  Yet, we observe data from finite trials, and because of this, the sample scores are perturbed from the true scores.  Figure \ref{fig:problem}B shows the scatter among the sample scores.  The trial noise perturbs these scores in all directions, and the result is the well-known attenuation of correlation by measurement error [@Spearman.1904a].  
+
+One of the unappreciated difficulties with trial noise is that the resulting confidence intervals (CIs) on correlation coefficients are miscalibrated.  Figure \ref{fig:problem}C shows CIs computed the conventional way with Fisher's $z$-transform method [@Fisher.1921].  Here, we ran a small simulation where data were generated and analyzed several times. The first third of bars, colored red in Figure \ref{fig:problem}C, show the CIs from 100 runs for 20 individuals per run (ordered by sample correlation value).  The width of these CIs reflect the number of individuals but not the amount of trial noise or the number of trials.  For 20 individuals, they are quite wide, but even so, the coverage of the true correlation is not near the nominal .95 value.  As the number of individuals is increases (blue and green bars), the CIs narrow and the coverage becomes even worse.  Let's not gloss this over---coverage actually decreases with an increasing number of individuals!  The analyst becomes more sure of a bad answer.  
+
+The main difficulty with these CIs is that they do not reflect the influence of trial noise.  They are the CIs that reflect uncertainty from a finite number of individuals as if each had run an unlimited number of trials.  The difficulties with these CIs is highlighted by comparing them to a more appropriate hierarchical treatment.  A hierarchical linear model with separate variance components for trial noise and individuals was applied to the trial-level data underlying Figure \ref{fig:problem}B (we specify this model subsequently as the unconstrained-variance model).  The resulting posterior on the correlation across two tasks is shown in Figure \ref{fig:problem}D.  The true value of .5 is located in the middle of the posterior indicating that the model effectively disattenuates the correlation.  The posterior, however, is wide.  It is much wider than the corresponding CI (see the horizontal error bar) showing the needed inflation from trial noise.  We have shown previously that these credible intervals have reasonable frequentist coverage properties [@Rouder.etal.2023a;@Mehrvarz.Rouder.2025]---95% credible intervals cover the true value about 95% of the time in realistic simulations.
+
+
+```{r problem, fig.cap="Effects of trial noise on correlations.  A. Hypothetical true values are correlated at .5 in value.  B. Adding trial noise perturbs points in the scatter plot resulting in a substantially lower correlation.  C. Sample correlations with 95% confidence intervals across repeated simulations.  As the number of individuals increase, the analyst becomes more sure in an attenuated answer.  D. Posterior of correlation coefficient from a hierarchical model.  The overall correlation values do not suffer from attenuation.  Moreover, the uncertainty is large because it reflects trial noise as well as finite samples of individuals."}
+
+source('twoTasksCor.R')
+set.seed(987)
+draw2TaskFigure(I=200,fileName="run1")
+```
+
+## Underestimating The Salience of Factors
+
+These difficulties in estimating correlations extend to factor analyses of experimental-task data.  The main problem is that trial noise inflates residual variation resulting in less clear and less salient factor structures.  We illustrate this problem with the following synthetic example that will be used throughout.  Consider a battery of eight experimental tasks.  Each task has two conditions, congruent and incongruent, with the later requiring more executive control than the former.  The difference between the two conditions forms the target of inquiry.  Each of 200 individual performs 100 trials in each condition, and the total number of observations is $320000$ ($200 \times 8 \times 2 \times 100)$.  With the take-the-mean approach, this total is reduced to a matrix that is 200 individual by 8 tasks or 1600 scores. 
+
+```{r}
+set.seed(123)
+source('intro.R')
+truth=makeTruth(I=200,J=8,trialNoise=200)
+saveRDS(file="run2Truth.Rds",truth)
+dat=makeData(truth,L=100)
+write.table(file="run2Dat.txt",dat,quote=F,row.names = F)
+priorRT=list(
+    "mu.m"=70,
+    "mu.s"=100,
+    "alpha.m"=1000,
+    "alpha.s"=1000,
+    "tuneDelta"=25,
+    "tuneLambda"=25,
+    "tuneTau"=200)
+
+
+if (file.exists("run2Mod.Rds")) {
+  message("Loading existing model from file.")
+  samples = readRDS("run2Mod.Rds")
+} else {
+  message("File not found. Running model...")
+  orig = facH.run(dat, numFactors = 2, prior = priorRT, M = 5000)$BUGSoutput$sims.list
+  saveRDS(orig,file = "run2Mod.Rds")
+  samples = orig
+}
+
+
+```
+
+```{r exampleTrueLoads, results="as.is"}
+lambda=truth$lambda
+dims=dim(lambda)
+row.names(lambda)=paste("Task",1:dims[1])
+colnames(lambda)=paste("Factor",1:dims[2])
+apa_table(lambda,caption = "Ground Truth Factor Loadings (ms)")
+```
+
+Suppose performance on the task is mediated by two factors.  Table \ref{tab:exampleTrueLoads}  shows ground-truth loadings for this case.  Factor 1 loads most highly on Task 1, second-most highly on Task 2 and decreases subsequently.  Factor 2 loads most highly on Task 8, second most highly on Task 7, and decreases subsequently.  Factor models are a decomposition of variance into common factor and unique residual components [@Bollen.1989], and this decomposition is depicted in Figure \ref{fig:facIntro}.   The top row, labeled "Population," shows the case for the ground truth at the population level.  The total variance across tasks is shown on the left, and the influences of the factors are shown on the right.  Because Factor 1 loads most highly on Task 1 and 2, the contribution to variance of these tasks is greatest.  Factor models include a residual variance term, which is variability unique to a task.  This residual is a diagonal matrix.  It is helpful to track the contribution of each factor and the residual to the total, and a suitable measure is the trace of each matrix (the trace is the sum of the diagonal elements).  We designed this example so that Factor 1, Factor 2, and the residual components each account for about 1/3rd of the total variance.
+
+```{r facIntro,fig.cap='Factor decomposition of variance.  The first column shows the overall variance, which is the sum of influences from two factors (second and third columns) and a residual (fourth column).  The top row, "Population", shows the decomposition for true values across the population.  The next row, "Individual" shows the effects of sampling 200 individuals.  True values unperturbed by trial noise are decomposed.  The next row, "Trial Noise" shows the decomposition from take-the-mean scores on observations.  The difficulty here is that trial noise is manifest in the residual making factors appear less salient.  The last row, "Model" shows the decomposition within the hierarchical model.  Trial noise no longer inflates the residuals making factors appropriately salient.'}
+source("intro.R")
+v=plotFacDecomp(truth,dat,samples)
+comp=v[,2:4]/v[,1]
+```
+
+The second row shows the effect of sampling individuals from the population.  The variance matrix is that of true scores and is analogous to the scatter in Figure \ref{fig:problem}A. The factor decomposition of this matrix is shown across the second row.  There is some distortion of the factor loadings as there is only a finite sample of 200 individuals.  Importantly, the influence of the residual is not amplified.  In fact, each component contributes about 1/3 of the variances as the fluctuations are not systematic.  The third row shows what happens with observed data.  The inputs are the trial-by-trial observations, and scores are computed with take-the-mean aggregation.  Shown is the empirical variance matrices of the scores, and, as before, the effect is a notable attenuation of off-diagonal terms.  This attenuation occurs because trial noise inflates the residual.  The factor decomposition of this take-the-mean variance matrix is shown.  The factors each account for about 18.5% of the variance while the residual accounts for 63% making the factors appear less salient and theoretically less important than they truly are.
+
+The goal of this paper is to provide accurate factor models for experimental task data.  The last row of Figure \ref{fig:problem} foreshadows how we meet this goal.  It is the results of the hierarchical factor model that is the main topic of this report.  As can be seen, the model is highly successful---the salience of the factors is restored in the hierarchical model analysis.  Each factor accounts for about 1/3rd of the variance, and the residual accounts for the remaining 1/3rd.  It is this success that should change how researchers perform factor analysis with experimental data.
+
+# Overview of The Hierarchical Solution
+
+Although researchers often incorporate tasks with repeated trials into their latent-variable analysis, they rarely account for trial noise.  As a result, latent patterns are appear both less salient and more stable than they are.  The solution to this problem is conceptually straightforward---trial noise should be modeled simultaneously with individual differences in a hierarchical setup.   At the first level of the hierarchy---*the data level*---observables are modeled as a function of individual true scores in tasks and trial noise.  At the second level--*the latent level*---these individual true scores are modeled with latent-variable models.  In this paper we combine linear data models with exploratory and confirmatory factor models.  Our goal is to make this development convenient for routine use in psychological science.  We develop in the Bayesian framework as it is computationally convenient for hierarchical models [@Jackman.2009;@Lee.2007] and associated tools such as Stan [@Carpenter.etal.2017] and JAGS [@Plummer.2003] are powerful and user friendly.
+
+Here is how to differentiate this hierarchical use of factor models from the more conventional use.  In the more usual use, the input is a matrix of observed scores.  These are manifest variables, and we can refer to the model here as a *manifest factor model*.  In the current development the input to the factor models are not observables, they are themselves latent variables that must be modeled.  We term these models as  *hierarchical factor models* as they are hierarchical in the sense of @Raudenbush.Bryk.2002.  Unfortunately, the term  *hierarchical factor models* has a different meaning in an older factor-analysis literature.  It refers to  placing latent factors themselves in a hierarchy [@Schmid.Leiman.1957;@Tucker.1940] rather than using a hierarchical structure to account for measurement error.  In the modern literature, the older usage of hierarchical factors would fall under structural-equation modeling.  Hence, we use the term *hierarchical factor models* in the more modern sense of @Raudenbush.Bryk.2002 and not in the older sense of @Tucker.1940.  In the experimental-psychology context, they refer to models that explicitly account for trial noise along with factor structures on individual variation.
+
+Factor models have a long and storied history in psychology [@Spearman.1904;@Thurstone.1938;@McCrae.CostaJr.1997;@Caspi.etal.2014], and Bayesian analysis with factor models is well developed [@Lopes.West.2004;@Ando.2009;@Bhattacharya.Dunson.2011;@Merkle.etal.2021].  The usual context is that factor models are manifest in that they are applied to a matrix of observed scores.  A few authors have developed them in the hierarchical context promoted here.  In many of the previous applications, the factor model serves as a regularization devise to help estimate either individual scores or the variance matrix among these scores [@Mehrvarz.Rouder.2025;@Kang.etal.2022].  Our development is most similar to @Stevenson.etal.2024 and Stevenson.etal.2024b inasmuch as the target of analysis is the estimation of a factor structure in a hierarchical setting. 
+
+As prologue, the hierarchical factor model has the following advantages that should promote their adoption:
+
+1. **Accurate Estimates:**  In Figures \ref{fig:problem} and \ref{fig:facIntro} we demonstrated that non-hierarchical methods dramatically underestimate correlations and the salience of factors.  In hierarchical factor models, model-based estimates are accurate.  The salience of the factor structure is not understated and resulting correlations are not attenuated in value.  The disattenuation is similar in spirit to Spearman's disattenuation [@Spearman.1904a] with two notable advantages:  First, the disattenuation is more general in that it applies to the salience of factors as well as correlations; second, it is more interpretable in that correlations and proportion-of-variance measures are constrained to the appropriate intervals. 
+
+2. **Calibrated Uncertainty:**  In Figure \ref{fig:problem} we showed that confidence intervals are miscalibrated---in fact too narrow---because they fail to account for trial noise.  In the hierarchical factor model, uncertainty reflects the number of trials, the degree of trial noise relative to true variation across individuals, and the number of individuals [@Rouder.Mehrvarz.2024].  When correlations are disattenuated for trial noise, there is uncertainty in the disattenuation process that must be reflected in the uncertainty about correlations and factor loadings.  The hierarchical factor model provides an appropriate approach for understanding the limits of the resolution of the data for inference about correlations and the associated factor structure.  This understanding assuredly leads to better science.
+
+
+3. **No Heywood Cases.**  Heywood cases are a well-known problem in factor analysis where the resulting variances may be negative and resulting correlations may be out of the [-1,1] range. The Bayesian approach adopted here with proper priors is not prone to Heywood cases  [@Congdon.2003;@Lopes.West.2004].
+
+In the next section, we provide a quick review of the conventional orthogonal factor model on manifest variables.  Following this brief review, we present the  hierarchical factor model.  In the remaining sections we provide a series of applications that highlight the usefulness, performance, and the unique insights afforded by hierarchical factor models.
+
+# The Manifest Factor-Model Specification
+
+Factor models form a class of latent variable models that have proved to be fruitful in psychological science.  We assume readers have a passing familiarity with the aims, uses, and interpretations of factor models.  In the following, we review the conventional factor model for manifest or observed data.  Our focus here is on issues pertinent to Bayesian analysis and hierarchical extensions.  Readers seeking a systematic development are referred to @Skrondal.Rabe-Hesketh.2004 and @Gana.Broc.2019 for theoretical and applied treatments, respectively.
+
+The input to a manifest factor model is a matrix of observations.  The rows of the matrix denote individuals; the columns denote measures (or tasks in psychology batteries); the entries, $Y_{ij}$ are the score for the $i$th individual, $i=1,\ldots,I$ on the $j$th measure, $j=1,\ldots,J$.  In the previous example, there were $I=200$ individuals and $J=8$ tasks.  The inputted matrix to the manifest model had 1600 observations.
+
+Factor models describe a decomposition of the matrix of scores into a reduced number of factors, $M$, where $M<J$.   An intuitive but incomplete expression of the model is:
+\[
+Y_{ij} = \mu_j + \sum_{m=1}^M \lambda_{jm}\eta_{im} + \epsilon_{ij}.
+\]
+Here, $\mu_j$ is a population mean score on the $j$th measure, $\lambda_{jm}$ is the *factor loading* for the $j$th measure on the $m$th factor, $\eta_{im}$ is the *factor score* for the $i$th individual on the $m$th factor, and $\epsilon_{ij}\sim \mbox{N}(0,\delta^2_j)$ is normally-distributed, zero-centered, measure-specific residual error not accounted for by the factor structure.  Each person may be described by the vector of factor scores: $\bfeta_i=\eta_{i1},\ldots,\eta_{iM}$.  The scores are usually $z$-scores, so a value of $\eta_{im}=-2$ is a particularly low score.  More importantly, these values are treated as random effect, e.g., $\eta_{im} \sim \mbox{N}(0,1)$.  The more complete specification is:
+$$
+\begin{aligned}
+Y_{ij} \mid \eta_{i1},\ldots,\eta_{iM}&= \mu_j + \sum_{m=1}^M
+\lambda_{jm}\eta_{im} + \epsilon_{ij}\\
+\eta_{im} &\sim \mbox{N}(0,1) 
+\end{aligned}
+$$
+
+
+
+It is convenient to recast the model with matrix notation.  Let $\bfY_i=(Y_{i1},\ldots,Y_{iJ})'$ be a column vector of scores for the $i$th individual.  Then, the model may be rewritten as
+\begin{eqa} \label{conditional}
+\bfY_{i} \mid \bfeta_i & \sim& \mbox{N}_J(\bfmu+\bfLambda\bfeta_i,\;D(\bfdelta^2)),\\
+\bfeta_i & \sim &\mbox{N}_M(\bf0,\bfI). \nonumber
+\end{eqa}
+Model parameters are as follows: $\bfmu=(\mu_1,\ldots,\mu_J)'$ is a vector of $J$ true means, $\bfLambda$ is the $J\times M$ matrix of factor loadings, $\bfeta_i=(\eta_{i1},\ldots,\eta_{iM})'$ is a vector of $M$ factor scores for the $i$th individual, and $D(\bfdelta^2)$ is a $J \times J$ diagonal matrix with the diagonal given by $(\delta^2_1,\ldots,\delta^2_J)$.  
+
+Equation \ref{conditional} is conditional on factor scores.  Whereas factor scores are fully specified, it is possible to marginalize with respect to them.  The marginal form of the model is
+\begin{equation} \label{marginal}
+\bfY_i \sim \mbox{N}_J(\bfmu,\bfSigma),\quad \bfSigma=\bfLambda\bfLambda'+\bfD(\bfdelta^2).
+\end{equation}
+The conditional and marginal forms are identical in content.  That said, they have different computational properties.  In the conditional form, the scores are conditionally independent and the residual variance has no covariance terms.  Covariance from the factor structure enter through the location (mean) with additions of $\bfLambda\bfeta_i$.  In the marginal form, covariance from the factor structure enters the variance rather than the mean.  Because the variance now captures the complete factor structure, it is useful for understanding model behavior.  
+
+Figure \ref{fig:facIntro} shows the decomposition for two factors.  The key is that the crossproduct $\bfLambda\bfLambda'$ may be written as the sum of the influence of each factor on variance.  Let $\bflambda_m=(\lambda_{1m},\ldots,\lambda_{Jm})'$ be the loadings of all tasks onto the $m$th factor.  Then, the influence on variance of this factor is  $\bflambda_m\bflambda_m'$.  For example, the second column in Figure \ref{fig:facIntro} shows $\bflambda_1\bflambda_1'$, the influence of the first factor.  The third column in Figure \ref{fig:facIntro} shows $\bflambda_2\bflambda_2'$, the influence of the second factor.  The crossproduct $\bfLambda\bfLambda'$ is simply the sum of these influences from all factors, that is,  $\bfLambda\bfLambda'= \sum_m \bflambda_m\bflambda_m'$.  We find breaking up the crossproduct this way to be helpful in visualizing factor decompositions and, to our limited knowledge, the representation is novel in psychology.
+
+# Hierarchical Factor Model Specification
+
+The main goal is to account for multiple trials and trial noise in experimental settings.  We develop a hierarchical model with a data level and a latent level, where the latent level is a factor model.  We take the development in two steps.  Consider a battery composed of $J$ experimental tasks.  Each task has a control and treatment condition, and the main measure of interest is the difference between them.  For example, in the Stroop task, incongruent stimuli serve as treatment and congruent ones serve as control.  Each observation in this battery is denoted by $Y_{ijk\ell}$ where $i=1,\ldots,I$ indexes individuals, $j=1,\ldots,J$ indexes tasks, $k=1,2$ indexes conditions, and $\ell=1,\ldots,L_{ijk}$ indexes the replicate trials in the conditions.  
+
+The input to the model is the full array of data.  For example, if there are $I=200$ individuals, $J=8$ tasks, and $L_{ijk}=100$ replicates per individual per task per condition, then the total number of observations is $N=I\times J\times 2\times L=320000$ observations.  It is instructive to compare this input to that of the manifest model.  To use the manifest model, we take means over replicates and conditions to arrive at a single score per person per task.  For $I=200$ and $J=8$, there are 1600 scores that serve as input.  In contrast, the hierarchical version is a much larger models encompassing a great many more observations.
+
+The first step is the data model.  Here is a simple data model for treatment-control tasks:
+$$
+Y_{ijk\ell} \mid \theta_{ij} \sim \mbox{N}(\alpha_{ij}+x_k\theta_{ij},\;\tau_j^2)
+$$
+
+In this setup, $\alpha_{ij}$ is the overall performance of the $i$th individual on the $j$th task, $x_k=-1/2,\;1/2$ is a condition indicator, and $\theta_{ij}$ is the *effect* of the $i$th individual on the $j$th task.  Parameter $\tau^2_j$ is the trial noise on the $j$th task.  The target of inquiry are the effects, $\theta_{ij}$, which are modeled as random effects subsequently.  Because these are random and the target of inquiry, we include them as a conditional in the above equaiton.
+
+The data model may be generalized beyond a treatment-control task as follows.  Let $\bfY_{ij}$ be a vector of $n_{ij}$ observations for the $i$th person on the $j$th task.  Then,
+\begin{eq} \label{datMod}
+\bfY_{ij} \sim \mbox{N}_{n_{ij}}(\bfX_{0ij}\bfalpha_{ij}+\bfX_{1ij}\theta_{ij},\bfI\tau^2_j),
+\end{eq}
+where $\bfX_{0ij}$ is a $n_{ij}\times K$ design matrix, $\bfalpha_{ij}$ is a vector of auxiliary parameters of length $P$, $\bfX_{1ij}$ is a design vector of length $n_{ij}$, $\bfI$ is the $n_{ij} \times n_{ij}$ identity matrix, and $\tau^2_j$ describes the trial noise for the $j$th task.  For the above example with an overall mean and difference score, $\bfX_{0ij}$ would be a vector of 1's; $\bfalpha_{ij}$ would be a single parameter $\alpha_{ij}$, $\bfX_{1ij}$ would be a vector with -1/2 and 1/2 entries for congruent and incongruent trials, respectively.
+
+The data model is an ordinary linear model with the constraint that trial noise is constant across people within a task.  Although we develop the hierarchical model with this simple data model, it may be possible to use alternative data models depending on context.  For example, if observations are dichotomous, then it may be desirable to use a logit-linked data model.  Likewise, if observations are response times, it may be desirable to use a skewed distribution.  It is conceptually straightforward to adopt these data models in the Bayesian framework [@Kang.etal.2022; @Rouder.2025; @Stevenson.etal.2024; @Stevenson.etal.2024b].  In this publication, we develop with a linear data model; developments outside this model remain for future studies.
+
+The next step is placing a factor model on target effects $\theta_{ij}$.  Let $\bftheta_i=(\theta_{i1},\ldots,\theta_{iJ})'$ be a column vector of effects:
+\begin{eq} \label{facMod}
+\bftheta_i \sim \mbox{N}_J(\bfnu\,\bfSigma),\quad \bfSigma=\bfLambda\bfLambda'+D(\bfdelta^2). 
+\end{eq}
+The hierarchical factor model is comprised of data model (\ref{datMod}) and factor model (\ref{facMod}).
+
+
+# Analysis
+
+
+Several researchers have proposed and developed Bayesian analysis of the manifest factor models [@Ando.2009;@Bhattacharya.Dunson.2011].  We follow @Merkle.etal.2021 who provide development on two separate tracks.  One of these is based on the conditional form of the model with explicit parameters for factor scores and factor loadings (see Eq. \ref{conditional}).  The other is based on the marginal form (see Eq. \ref{marginal}).  
+
+The conditional form is perhaps the simplest.  The advantage of this approach is that conditional posterior distributions of factor scores and factor loadings are independent normal distributions, which are exceedingly quick to sample in Markov chain Monte Carlo (MCMC) analysis.  The disadvantage may be poor mixing in some contexts where posterior chains are highly correlated and slow to converge [@Ghosh.Dunson.2009].  This poor mixing is problematic when the chain relies on sequential sampling of each parameter in Gibbs steps.  The marginal form is recommended by @Merkle.etal.2021 to avoid poor mixing in the conditional form.  The drawback of using the marginal form is speed---it takes substantially longer to sample from correlated multivariate normal distributions.   We have developed both forms.  We find that for the hierarchical factor models presented here that the conditional form mixes well in JAGS and Stan and runs substantially faster than the marginal form. 
+
+**Priors.**  Model specification is completed by providing priors on parameters.  At the data level, priors are needed for the collection of auxiliary parameters $\bfalpha_{ij}$ and trial variance $\tau_j^2$.  We choose conjugate forms that are weakly informed and have mass across a broad range of plausible values:
+$$
+\begin{aligned}
+\bfalpha_{ij} &\sim \mbox{N}_P(\bfm_\alpha,\bfS_\alpha),\\
+\tau_j \sim &\mbox{Inverse-$\chi^2$}(1,s^2_j),
+\end{aligned}
+$$
+
+where the inverse-$\chi^2(a,b)$ where parameters $a$ and $b$ denote the degrees-of-freedom and scale of the distribution, respectively.  Values of $\bfm_\alpha$, $\bfS_\alpha$, and $s_j$ must be chosen before hand.  For example, in the treatment-control design with subsecond response times as data, we placed a normally-distributed prior on $\alpha_{ij}$ with means of 800 ms and standard deviations of 1000 ms.  Likewise, the value of $s_j$ reflects an anticipated standard deviation with repeated trials.  We set it to 200 ms as this is fairly typical.  The inverse-$\chi^2$ with 1 degree of freedom is a fat-tailed distribution, and with this setting, there is sizable prior mass from 20 ms to 2000 ms.  The choices here are benign in that they have no undue influence on posterior quantities.  
+
+At the latent level, priors are needed for for task mean, $\bfmu$, factor scores, $\bflambda$, and residual variances, $\bfdelta^2$.  Again, conjugate forms are broad, flexible, and convenient:
+$$
+\begin{aligned}
+\mu_j &\sim \mbox{N}(a_j,b^2_j)\\
+\lambda_{jm} &\sim \mbox{N}(0,c^2_j)\\
+\delta^2_j &\sim \mbox{Inverse-$\chi^2$}(1,d^2_j)
+\end{aligned}
+$$
+As before, values of constants must be chosen before hand.  We used @Haaf.etal.2024, who surveyed 64 cognitive control tasks, as guidance.  The priors on $\bfmu$ may be diffuse.  In the executive-function task battery example, typical differences between congruent and incongruent conditions are 60 ms, and we chose $a_j$ to be this value and $b_j=100$ ms such that a broad range of effects on the tens to hundreds of milliseconds are plausible.  We used more informed priors for factor loadings and residuals. According to @Haaf.etal.2024, we may expect that the total variation in $\bftheta$ is about 35 ms in standard deviation.  Guided by this value, we chose $c_j$ and $d_j$ to be 25 ms.  We explore sensitivity to these choices subsequently.
+
+**Rotations.**  It is well known that factor models are identified only up to rotation.  A matrix $\bfA$ is called a rotation matrix if $\bfA'=\bfA^{-1}$ and that the determinant of $\bfA$ is 1 in value.  A good example of such a matrix is Euler's rotation matrix: 
+$$
+\bfA(\phi) = \begin{pmatrix} \cos \phi & -\sin \phi \\ \sin \phi & \cos \phi\end{pmatrix},
+$$
+To confirm this is a rotation matrix, it is straightforward to show that for all $\phi$, $\det(\bfA(\phi))=1$ and $\bfA'=\bfA^{-1}$.  Rotations are problematic because  different factor-loadings give rise to the same covariance matrix $\bfSigma$.  Here is how.  Note that in the factor model, $\bfSigma=\bfLambda\bfLambda'+D(\bfdelta^2)$ for some $\bfLambda$. We can rotate $\bfLambda$ by $\bfA$ to yield a new factor loading matrix $\bfLambda_r=\bfLambda\bfA$.  Note that $\bfLambda_r\bfLambda_r'= \bfLambda\bfA (\bfLambda\bfA)' = \bfLambda\bfA \bfA' \bfLambda' = \bfLambda\bfA \bfA^{-1} \bfLambda' = \bfLambda\bfI \bfLambda' = \bfLambda \bfLambda'.$   Hence, $\bfSigma$ is concordant with both $\bfLambda$ and $\bfLambda_r$; both are equally good factor-loading solutions for any data set.
+
+In frequentist analysis, this rotational indeterminancy is benign.  Analysts rotate their solutions to aid interpretation much like a hiker might rotate a topographic map to match the view of the landscape.  A good example of rotation-to-aid-intepretation is the varimax rotation [@Kaiser.1958] where factors are rotated so that tasks load highly on a minimal number of factors.  Even though rotational indeterminacy is benign in frequentist analysis, it is far more difficult in Bayesian analysis.  The problem comes about in sampling with MCMC.  Different iterations in the MCMC chain often correspond to different rotations.  
+
+Figure \ref{fig:rotate}A shows this complication.  Plotted in red are factor loadings for Task 1 for different iterations.  They sweep a large arc, with the arc representing different rotations for different iterations.  Plotted in blue are the loading for Task 4, and they sweep too large of an arc for the same reason.  The two solid lines correspond to a single iteration, and they show the relationship between Task 1 and Task 4.  The cosine of the angle is the correlation between the tasks on the iteration, and it is about .62 in value.  The dashed lines correspond to a different iteration, and the cosine of the angle is also about .62 even though the iteration is rotated compared to the first.  The stability of the correlation is expected as different rotations on different iterations are samples from the same covariance matrix.
+
+The problem remains that the posteriors for factor loadings are artifactually too diffuse.  Solutions to this rotation problem with MCMC are two-fold:  One solution is to use priors to set a specific rotation where the first task loads only onto the first factor, the second task loads only onto the first two factors and so on.  The requirement is that $\bflambda$ forms a lower triangular matrix with positive diagonal elements, and examples of this approach are in @Ghosh.Dunson.2009, @Geweke.Zhou.1996 and @Vandekerckhove.2014.  The drawback of this approach is that the choice of which loadings to set to zero is arbitrary yet impactful [@Chen.etal.2020].  An alternative solution is to use post-sampling alignment algorithms [@Poworoznek.etal.2021;@Papastamoulis.Ntzoufras.2022;@Rockova.George.2016].  In these approaches, chains are unrestricted and each may correspond to different rotations as they do in Figure \ref{fig:rotate}A.  Afterwards, loadings on each iterations are aligned to a common rotation.  Figure \ref{fig:rotate}B shows the results after alignment with the Poworoznek et al.'s `jointrot` algorithm.  As can be seen, this algorithm works exceedingly well and the excessive diffusion from rotation indeterminancy is eliminated.
+
+```{r}
+source('facExtra.R')
+samples=readRDS('run2Mod.Rds')
+truth=readRDS('run2Truth.Rds')
+aligned=makePositive(align(samples))
+o=alignToTruth(aligned$lambda,truth$lambda)
+
+#samplesP=makePositive(samples)
+M=dim(samples$lambda)[1]
+J=dim(samples$lambda)[2]
+rho=array(dim=c(M,J,J))
+for (m in 1:M){
+  rho[m,,]=cov2cor(crossprod(t(samples$lambda[m,,]))+
+                          diag(1/samples$pDelta2[m,]))}
+```
+
+```{r rotate, fig.cap="Rotations may be problematic in Bayesian MCMC analysis without post-rotational alignment.  A. Factor loadings on two dimensions for Tasks 1 and 5.  Multimodal posteriors result because each iteration corresponds to a different rotation.",fig.asp=.6}
+pointA=101
+pointB=102
+samplesP=makePositive(samples)
+layout(matrix(nrow=1,1:2),widths=c(1,1))
+par(mar=c(4,4,2,2),mgp=c(2,1,0))
+plot(samplesP$lambda[,1,o],pch=19,col=rgb(1,0,0,.01),
+     ylim=c(-10,40),xlim=c(-30,40),
+     xlab="Factor Loadings on First Factor",
+     ylab="Factor Loadings on Second Factor",asp=1)
+points(samplesP$lambda[,8,o],
+       pch=19,col=rgb(0,0,1,.01))
+legend(-30,60,legend=c("Task 1","Task 8"),fill=c(rgb(1,0,0),rgb(0,0,1)))
+segments(0,0,samplesP$lambda[pointA,1,1],samplesP$lambda[pointA,1,2])
+segments(0,0,samplesP$lambda[pointA,8,1],samplesP$lambda[pointA,8,2])
+segments(0,0,samplesP$lambda[pointB,1,1],samplesP$lambda[pointB,1,2],lty=2)
+segments(0,0,samplesP$lambda[pointB,8,1],samplesP$lambda[pointB,8,2],lty=2)
+mtext(side=3,adj=0,cex=1.2,"A")
+#boxplot(rho[,1,5],ylab="Correlation",ylim=c(-1,1))
+#mtext(side=3,adj=0,cex=1.2,"B")
+plot(aligned$lambda[,1,o],pch=19,col=rgb(1,0,0,.05),
+     ylim=c(-10,40),xlim=c(-30,40),
+     xlab="Factor Loadings on First Factor",
+     ylab="Factor Loadings on Second Factor",asp=1)
+points(aligned$lambda[,8,o],pch=19,col=rgb(0,0,1,.05))
+segments(0,0,aligned$lambda[pointA,1,o[1]],aligned$lambda[pointA,1,o[2]])
+segments(0,0,aligned$lambda[pointA,8,o[1]],aligned$lambda[pointA,8,o[2]])
+segments(0,0,aligned$lambda[pointB,1,o[1]],aligned$lambda[pointB,1,o[2]],lty=2)
+segments(0,0,aligned$lambda[pointB,8,o[1]],aligned$lambda[pointB,8,o[2]],lty=2)
+mtext(side=3,adj=0,cex=1.2,"B")
+
+```
+
+# Implementation
+
+The above development may seem daunting especially to psychologists who are used to working in `Lavaan` and other extant factor analysis programs.  There may be much new here including Bayesian models, hierarchical models, and post-sampling alignment.  Analysis is conveniently performed in R with JAGS.  We provide a supplement at https://github.com/specl/ctx-factor/blob/main/youCanDoIt/syntheticExample.pdf that provides the code and step-by-step instructions for using it.  
+
+
+# Performance
+
+Now that the model is specified and analyzed, the next step is assessing the quality of the analysis.
+
+## Mixing
+
+The first task is assessing the mixing in the chains.  Mixing may be problematic in Bayesian factor models, especially when the conditional model is used with Gibbs steps [@Ghosh.Dunson.2009].  The main culprit in the conditional model is the trade-off between factor loadings $\lambda_{jm}$ and factor scores, $\eta_{im}$.  These enter into the model as products, $\lambda_{jm}\eta_{im}$, which means that the product is preserved if loadings are multiplied by a constant while scores are divided by the same constant.  Indeed, we do find poor mixing when we derive the full-conditional posteriors and sample with Gibbs sampling.  Fortunately, these models are easily implemented in JAGS and Stan, which do not rely on Gibbs sampling.  We have implemented the conditional and marginal hierarchical models in both JAGS and Stan, and highlight the case here for the JAGS implementation of the conditional hierarchical model as this runs most quickly.  Figure \ref{fig:mixing} shows the evidence for good mixing.  The first two panels show the case for selected factor loading and factor score parameters.  The last panel shows a boxplot of effective sample sizes [@Kong.etal.1994] for all parameters.   The chain was run for 5000 iterations, and as can be seen, the vast majority of effective sample sizes are within 80% of this value.  Hence, we can be assured that posterior quantities are based on at least 4000 effective samples.   The bottom line is that mixing is not problematic in modern general-purpose samplers.
+
+
+```{r mixing,fig.cap="Hierarchical model mixes well when implemented in JAGS.  Left and Center: Chains for select parameters.  Right: Boxplot of effective sample sizes for all parameters for a chain with 5000 iterations."}
+library(posterior)
+selectLam=aligned$lambda[,1,o[1]]
+legTextLam=c(expression(lambda[paste(1,",",1)]))
+par(mfrow=c(1,3),mgp=c(2,1,0),cex=1.0,mar=c(4,3,2,1))
+plot(selectLam,typ='l',xlab="Iteration",ylim=c(-20,50),
+     ylab="Factor Loading (ms)")
+legend("topright",lwd=2,legend=legTextLam,bg="white")
+selectEta=aligned$eta[,1,o[1]]
+legTextEta=c(expression(eta[paste(1,",",1)]))
+plot(selectEta,xlab="Iteration",typ='l',
+        ylab="Factor Score ")
+legend("topright",lwd=2,legend=legTextEta,bg="white")
+ess=apply(aligned$eta,2:3,ess_bulk)
+boxplot(as.vector(ess),col='lightblue',ylim=c(0,5000),ylab="Effective Sample Size")
+```
+
+**Parameter Recovery**  Parameter recovery is straightforward to assess as true values are known.  Figure \ref{fig:recover} shows the quality of recovery.  Panel A shows the case for factor loadings.  The true values are shown as a point enumerated by task; the 95% credible ellipses on posterior estimates of factor loadings are shown in matching color.  Overall, given the high-noise levels in the simulared data, the recovery is as expected.  Panel B shows factor loadings, and there is regularization or shrinkage as expected for high-noise data.  Panel C is perhaps the most important.  It shows the posterior mean residual standard deviation $\delta_j$ along with 95% credible intervals.  The true value, 20 ms, is shown as a horizontal line.  Key here is that the the posterior mean is **not** inflated as would be the case for take-the-mean scores.   Panel D shows the posterior distribution of the salience of the factors and the residual.  The true value is 1/3 of the variance for each, and the recovery is quite reasonable for a high-noise data.  Panel E shows the uncertainty in correlations between tasks.  There is much uncertainty, but that too is expected.  
+
+```{r recover, fig.cap="Parameter recovery.  A. Factor loadings show the gradual tradeoff in Table \ref{tab.exampleTrueLoads}.  Ellipses, the 95% credible intervals, show uncertainty in the loadings.  B. Recovery of factor scores shows an expected degree of regularization.  C. Recovery of residual variation.  D. Posterior uncertainty on proportion of variance accounted for by each factor and the residual.  E. Posterior on a correlation coefficient reflects uncertainty from individuals and trials."}
+
+library(ellipse)
+mycol=c("black","darkred","darkgreen","darkblue","purple4","orange4","slateblue4","brown3")
+par(mfrow=c(2,3),mgp=c(2,1,0),mar=c(4,4,1,1),cex=.9)
+plot(aligned$lambda[,1,o],typ='n',xlim=c(-10,50),ylim=c(-10,50),
+     xlab="Factor 1 (ms)",ylab="Factor 2 (ms)")
+for (i in 1:J){
+  center=apply(aligned$lambda,2:3,mean)[i,o]
+  cov_mat <- cov(aligned$lambda[,i,o])
+  ell <- ellipse(cov_mat, centre=center, level=0.95)
+  lines(ell, col=mycol[i], lwd=1,lty=1)}
+pLambda=apply(aligned$lambda,2:3,mean)[,o]
+#points(pLambda,pch=21,bg=mycol,cex=1.2)
+points(truth$lambda[,1],truth$lambda[,2],pch=paste(1:8),cex=1.2,col=mycol)
+facScore=apply(aligned$eta[,,o],2:3,mean)
+plot(truth$eta,facScore,
+     xlab="True Factor Scores",ylab="Estimated Factor Scores",pch=19,cex=.7,col=rgb(0,0,1,.1))
+abline(0,1)
+q=t(apply(sqrt(1/samples$pDelta2),2,quantile,p=c(.025,.5,.975)))
+plot(1:J,q[,2],ylim=c(0,35),typ='n',xlim=c(.5,J+.5),
+     xlab="Task",ylab="Residual Std. Dev (ms)")
+arrows(1:J,q[,1],1:J,q[,3],code=3,angle=90,length=.05)
+points(1:J,q[,2],pch=19)
+abline(h=20,col='darkgreen')
+
+M=dim(samples$lambda)[1]
+components=array(dim=c(M,3))
+rho=array(dim=c(M,J,J))
+for (m in 1:M){
+  trace=c(sum(diag(crossprod(t(aligned$lambda[m,,o[1]])))),
+             sum(diag(crossprod(t(aligned$lambda[m,,o[2]])))),
+             sum(1/samples$pDelta2[m,]))
+  components[m,]=trace/sum(trace)
+  rho[m,,]=cov2cor(crossprod(t(aligned$lambda[m,,]))+diag(1/samples$pDelta2[m,]))}
+plot(density(components[,3]),xlim=c(0,1),main="",
+     xlab="Proportion of Variance",ylab="Posterior Density")
+lines(density(components[,2]),col="green3",lwd=2)
+lines(density(components[,1]),col="blue",lwd=2)
+#legend("topright",legend=c("Factor 1","Factor 2","Residual"),lwd=2,col=c('green3','blue','black'))
+hist(rho[,1,4],main="",col="lightblue",axes=F,prob=T,
+     xlab="Correlation Coefficient",xlim=c(-1,1))
+axis(1)
+axis(2)
+```
+
+# Standardizing Factor Loadings For Decomposing Correlation Matrices
+
+Consider the manifest factor model $\bfY_i \sim N_J(\bfmu,\bfSigma), \; \bfSigma=\bfLambda\bfLambda'+D(\bfdelta^2)$.  One issue in this model is that $\bfSigma$ contains physical units.  For example if one measure is the individual's height in inches and the other is the individual's weight in pounds, then elements of $\bfSigma$ are in inches$^{2}$, inches$\times$pounds, and pounds$^2$.  The presence of different units for different measures makes visualizing and interpreting variances and loadings challenging.  The same problem holds for the hierarchical version where latent scores, $\bftheta$, have physical units as well.
+
+To ease this interpretation burden, analysts often work in correlations rather than variances and in standardized unit-free loadings rather than loadings with units.  One approach is to standardize model parameters [@Anderson.2003; @Bartholomew.etal.2011].  The loadings standardized by total variance are:
+$$
+\lambda^*_{jm} = \frac{\lambda_{jm}}{\sqrt{\sum_{m'}\lambda^2_{jm'}+\delta^2_j}}.
+$$
+When factor loadings are standardized this way, they decompose the correlation matrix rather than the variance.  Here is how it works:  Recall that $\bfSigma=\bfLambda\bfLambda'+D(\bfdelta^2)$.  Any variance matrix may be re-expressed as a correlation matrix as follows: $\bfSigma=D(\bfsigma)\bfrho D(\bfsigma)$ where $D(\bfsigma)$ is a diagonal matrix with $\bfsigma$, a vector of standard deviations, on the diagonal, and $\bfrho$ is the correlation matrix.  For the factor model, $\sigma_j=\sqrt{\sum_{m'}\lambda^2_{jm'}+\delta^2_j}$.  Therefore, standardized factor loadings are the factor decomposition of correlation matrices given by:
+$$
+\bfrho=\bfLambda^*(\bfLambda^*)' +D((\bfdelta^*)^2),
+$$
+where $\bfLambda^*$ is the factor loading matrix of standardized loadings and $\delta^*_j=\delta_j/\sqrt{\sum_{m'}\lambda^2_{jm'}+\delta^2_j}$ is the standardized residual.
+
+We will continue to place priors on unstandardized loadings and residuals.  For convenience, we will report correlations, standardized loadings and standardized residuals in the following applications.
+
+
+# Application: Individual differences in visual illusions
+
+One main question in the vision literature is whether people who are susceptible to one type of visual illusion are susceptible to other types as well.  There is a division in the literate were some authors advocate for a general-susceptibility factor [@Makowski.etal.2023] while others advocate that performance across illusions is at best weakly correlated [@Cretenoud.etal.2019].   We analyze data from @Mehrvarz.etal.2025 on individual differences in perceiving visual illusions.  An example of one of these---the Brentano illusion---is shown in Figure \ref{fig:iBat5Ill}A.  There are two demonstration examples, and consider for a moment just the upper one with the outer arrows pointing rightward and the inner arrow pointing leftward.  Individuals had to adjust the location of the inner arrow so that the red and blue lines equaled each other in length.  Though it may not appear it, they are equal in the figure.  Individuals tend to set the inner arrow too far to the left lengthening the red line at the expense of the blue line.  The lower demonstration has the arrows pointing in the reverse direction, and the participants here tend to set the inner arrow too far to the right lengthening the blue line at the expense of the red line.  Figure \ref{fig:iBat5Ill}B shows a Zöllner Illusion; the individual adjusted the angle of the near horizontal lines until they were perfectly parallel.  In the figure, the lines are indeed perfectly parallel, but because of the illusion, individual tend to apply a counter clockwise rotation to the 1rst, 3rd, and 5th line and a clockwise rotation to the 2nd and 4th line.
+
+The structure of the battery informs the subsequent modeling. In the battery, there where were two versions of each tasks.  The two versions of the Brentano illusion are shown in Figure \ref{fig:iBat5Ill}A. @Mehrvarz.etal.2024 included two versions to control for response bias.  For example, if a participant was biased toward setting the chevron to the left, it would enhance the illusion in one version and attenuate it in the other.   @Mehrvarz.etal.2024 ran a total of five illusions, the Brentano Illusion (both versions shown), the Zöllner Illusion (one version shown), the Ebbinghaus Illusion (not shown), the Poggendorf Illusion (not shown), and the Ponzo Illusion (not shown).  There were two versions of each illusion to control for response bias.  The two versions of each of five illusions results in a total of 10 tasks.
+
+
+```{r iBat5Ill,fig.cap="A. Two versions of the Brentano Illusion.  The blue and red segments are of equal length in each version.  B. The Zöllner Illusion.  The horizontal lines are parallel.  C. Observed correlation matrix for 2 versions of 5 illusions.  The on-diagonal blocks correspond to two versions of the same illusion.  ",fig.asp=.5}
+source('iBat5.R')
+par(mfrow=c(1,3))
+br(yc=.7,dir=1)
+br(yc=.3,dir=-1,add=T)
+mtext(side=3,adj=0,"A",cex=1.2,line=0)
+zol()
+mtext(side=3,adj=0,"B",cex=1.2,line=0)
+dat=loadiBat5('iBat5.csv')
+scores=tapply(dat$y,list(dat$sub,dat$task),mean)
+myCorPlot(cor(scores))
+mtext(side=3,adj=0,"C",cex=1.2,line=0)
+```
+
+
+
+
+## Conventional Analysis
+
+Data for conventional analysis were derived by taking the mean across replicate trials.  A single score, the strength of the illusion, was computed per individual per task.  Figure \ref{fig:iBat5Ill}C shows the sample correlations of these scores across tasks.   Inspection of the sample correlations shows that for three illusions, there is a high within-illusion correlations.  Other than that, correlations are modest.  
+
+@Mehrvarz.etal.2025 report a conventional exploratory factor analysis on take-the-mean scores.  Yet, the results were not so insightful.  Factors rotated by varimax largely assigned factors to tasks, with the first three factors isolating the three tasks with high within-illusion correlations.  Here, the design choice to control for possible response bias is what is most recovered---when there is little response bias there is a high degree of uninteresting correlation across the different versions of the same task.  
+
+To gain more insight and answer the theoretical questions about whether there is a common susceptibility factor, Mehrvarz et al. constructed a conventional bifactor model.  There were five illusion-specific factors that were used to account for correlations within illusions.  The remaining factor---the factor of interest---potentially loaded on all tasks.  The authors, however, were unable to fit this model (or similar ones) in a conventional framework because resulting variances were negative indicating Heywood cases [@Rindskopf.1984;@Cooperman.Waller.2022].
+
+## Hierarchical Analysis
+
+Bayesian analysis with proper priors is not hobbled by Heywood cases [@Lopes.West.2004].  We fit a hierarchical Bayesian bifactor model with five specific factors (one for each illusion) and two general factors.   The structure of the model is shown in Table \ref{tab:iBat5Tab}, which shows standardized loadings  $\Lambda^*$.  Where there are "-", the loading was fixed to zero.  The first factor therefore is a Zöllner factor as it loads only on the two versions of the Zöllner illusion.   The first five factors are illusion-specific and capture within-illusion correlations.  These five factors are treated as nuisance as the main substantive questions are not about correlations within illusions but across them.  The substantively important factors were the sixth and seventh.  These factors are exploratory in that they may load on all 10 tasks.  
+
+**Data:**  Let $X_{ijk}$ be the $k$th observation for the $i$th individual in the $j$th task ($i=1,\ldots,138$, $j=1,\ldots,10$, $k=1,\ldots,K_{ij}$) in natural units such as pixels or angular displacement.  Observations were scaled by the original authors as follows:  Let $v_{ij}$ be the sample variance of observations for the $i$th person and $j$th task. Effect-size-scaled observations $Y_{ijk}$ were defined as $Y_{ijk}=X_{ijk}/s_j$, where $s_j=\sqrt{(\sum_i v_{ij})/I}$ is a task-averaged standard deviation.  The original authors performed this scaling to obviate the need for units in all of there analyses and we follow them here.  These effect-size-scaled observations served as input to the hierarchical factor model. 
+
+**Data Model**.  The data model is $Y_{ijk} \sim \mbox{N}(\theta_{ij},\tau^2_j)$.
+
+**Factor Model**.  The factor model is given in (\ref{facMod}) where $\bftheta_i=(\theta_{i1},\ldots,\theta_{i,10})'$ for the 10 tasks.
+
+**Priors.**  The priors were as follows: $\mu_j \sim \mbox{N}(2,2^2)$, $\lambda_{jm} \sim \mbox{N}(0,1)$, $\tau_j^2 \sim \mbox{Inverse-}\chi^2(1,1)$, and $\delta^2_j \sim \mbox{Inverse-}\chi^2(1,1)$.  
+
+**Implementation.** Chains were run for 5000 iterations with the first 500 serving as burn in.  To align differing rotations within the MCMC chain, Factors 6 and 7 were aligned with the @Poworoznek.etal.2021 post-sampling alignment algorithm.  Nuisance factors do not enter into rotational alignment as rotations are fixed by the zero loadings.  These factors still may have a sign indeterminacy across iterations, and to address this issue, we fixed the loadings to be positive for the first version of each task for these nuisance factors.  The resulting chains mixed well, and the 4500 iterations were more than sufficient for consideration of posterior quantities.  A supplementary document at https://github.com/specl/ctx-factor/blob/main/youCanDoIt/illusions.pdf provides a tutorial with code on fitting the model to the data set. 
+
+
+## Results
+
+We report the standardized version of factor-model parameters.  The main output is the matrix $\bfrho$, the correlation matrix, and it's factor-model decomposition into loadings, and residuals.  This decomposition is shown in Figure \ref{fig:iBat5Decomp}.  First, note that the model based correlation matrix on the left is highly similar to the sample-based correlation in Figure \ref{fig:iBat5Ill}.  This similarity means that there was not much disattenuation and that trial noise is not problematic in this application.  Second, the decomposition is into nuisance factors (Factors 1 through 5), the two general factors (Factors 6 and 7), and the residual.  Factor 6 seems quite robust in accounting for variation; Factor 7 does not.  These result indicate that there is a single factor innterpretable as a general susceptibility to visual illusions.  The conclusion is reinforced by inspecting the standardized factor loadings in Table \ref{tab:iBat5Tab}.    Importantly, Factor 6 loads on all tasks; that is, it is indeed general. 
+
+Figure \ref{fig:iBat5Uncertainty} shows the uncertainty in critical parameters.  The proportional of variance accounted for by the 6th factor---susceptibility to illusions---centers at 23% with plausible values ranging from 15% to 30%.  This value is substantially more than the 6% accounted for by the seventh factor confirming the salience of a one-factor solution after accounting for within-illusion correlations.  Across illusion correlations are fairly small and fairly well localized.  And although the one-factor structure is clear, the associated amount of variance predicted from one illusion to another is a rather small 5% in value.  In this sense, the results are in line too with researchers who stress weak associations across different visual illusions [@Mazuz.etal.2023;@Grzeczkowski.etal.2017;@Cretenoud.etal.2021; @Cottier.etal.2023].  
+
+
+```{r}
+source('iBat5.R')
+source('facMod.R')
+priorIll=list(
+    "mu.m"=1,
+    "mu.s"=3,
+    "tuneDelta"=1,
+    "tuneLambda"=1,
+    "tuneTau"=1)
+# samples=fitiBat5(dat,prior=priorIll)
+# saveRDS(file="iBat5.Rds",samples)
+# samples=readRDS("iBat5.Rds")
+
+if (file.exists("iBat5.Rds")) {
+  message("Loading existing model from file.")
+  samples = readRDS("iBat5.Rds")
+} else {
+  message("File not found. Running model...")
+  samples = fitiBat5(dat, prior = priorIll)
+  saveRDS(samples, file = "iBat5.Rds")
+}
+
+std=standardize(samples)
+```
+
+```{r iBat5Decomp,fig.cap="Factor decomposition of modeled correlation for Mehrvarz et al's (2025) visual-illusion battery.",fig.asp=.3}
+source('iBat5.R')
+propVar=iBat5decomp(std)
+```
+
+
+
+```{r iBat5Tab,results="as.is",eval=T}
+mLambda=apply(std$lambda,2:3,mean)
+stringVals=ifelse(free,round(mLambda,3),"-")
+longNames=c("Brentano 1","Brentano 2","Ebbinghaus 1","Ebbinghaus 2","Poggendorf 1","Poggendorf 2","Ponzo 1","Ponzo 2","Zöllner 1","Zöllner 2")
+stringVals=cbind(longNames,stringVals)
+colnames(stringVals)=c("Task",1:7)
+apa_table(stringVals,
+           col_spanners = list(
+             "Nuisance Factors" = c(2,6),
+             "Exploratory Factors"=c(7,8)),
+          caption="Standardized Factor Loadings For Visual  Illusions")
+```
+
+```{r iBat5Uncertainty, fig.cap="A. Proportion of variance accounted for components of the factor decomposition.  B. Between-illusion correlations with 95% credible intervals.  These values are small and well localized. ",fig.asp=.5, eval = T}
+par(mfrow=c(1,2),mar=c(4,4,2,2),mgp=c(2,1,0))
+temp1=apply(propVar,1:2,function(x) sum(diag(x)))
+propVarPost=temp1[2:5,]/temp1[1,]
+plot(density(propVarPost[3,]),xlim=c(0,.5),col=mycol[3],lwd=2
+     ,main="",xlab="Proportion of Variance")
+lines(density(propVarPost[4,]),col=mycol[4],lwd=2)
+lines(density(propVarPost[2,]),col=mycol[2],lwd=2)
+lines(density(propVarPost[1,]),col=mycol[1],lwd=2)
+legend("topright",legend=c("Nuisance","Fac 6","Fac 7","Residual"),
+       lwd=2,col=mycol[1:4],bty='n')
+mtext(side=3,adj=0,cex=1.2,"A")
+
+withinIllusion=c(1,6,15,28,45)
+q=apply(std$rho,2:3,quantile,p=c(.025,.5,.975))
+upperTri <- lapply(1:dim(q)[1], function(i) {
+  mat <- q[i, , ]
+  mat[upper.tri(mat)]  # Returns just the upper triangle values
+})
+
+betweenIllusion=!(1:45 %in% withinIllusion)
+med=upperTri[[2]][betweenIllusion]
+o=order(med)
+lo=upperTri[[1]][betweenIllusion]
+hi=upperTri[[3]][betweenIllusion]
+lim=c(min(lo,-.2),max(hi,.7))
+plot(med[o],ylim=lim,typ='n',axes=F,
+     ylab="Correlation  Value",xlab="Correlation Index")
+n=length(o)
+arrows(1:n,lo[o],1:n,hi[o],code=3,angle=90,length = .05)
+points(med[o],pch=21,bg='gold',cex=1)
+mtext(side=3,adj=0,cex=1.2,"B")
+axis(2)
+axis(1,at=c(1,n))
+```
+
+
+# Application: Individual Differences in Cognitive Control
+
+We analyze data from @Enkavi.etal.2019 to assess the dimensionality of individual differences in cognitive control.  Included are six behavioral experimental tasks: a flanker interference task [@Eriksen.Eriksen.1974], a global-to-local interference task [@Navon.1977], a control-of-negative-priming task [@Egner.Hirsch.2005], a Simon interference task [@Simon.1969], and a Stroop interference task [@Stroop.1935].  Each task consisted of a congruent and an incongruent condition with the incongruent condition requiring more control to ignore the interfering information.  In each task, the dependent measure was response time, and the critical contrast to measure cognitive control was the difference in response time between the incongruent and congruent condition.  Response times in all tasks were about 700 ms and critical contrasts were about 70 ms.  The main theoretical question was whether there was a single factor corresponding to an ability to ignore interfering information.  
+
+Figure \ref{fig:enkaviCM}A  shows the observed correlations among the critical contrast across tasks where these scores come from the take-the-mean approach.  None of these correlations are too large (maximum is .24), and several are near zero.  One question is whether this lack of structure reflects attenuation from excessive trial noise, or, alternatively, whether it reflects a lack of true correlation across the tasks.
+
+## Hierarchical Analysis
+
+We fit a hierarchical Bayesian factor model with three general factors.   
+
+**Data Model**.  Let $Y_{ijk\ell}$ be a response time for the $i$th individual, $i=1,\ldots,203$, for the $j$th task, $j=1,\ldots,6$, in the $k$th congruency condition ($k=1,2$), for the $\ell$th replicate trial, $\ell=1,\ldots,L_{ijk}$.   The data model is 
+$Y_{ijk} \sim \mbox{N}(\alpha_{ij}+x_k\theta_{ij},\tau^2_j)$, where $x_k=-1/2,\;1/2$ and $\theta_{ij}$, the congruency effect, is the target of inquiry.
+
+**Factor Model**.  The factor model is given in (\ref{facMod}) where $\bftheta_i=(\theta_{i1},\ldots,\theta_{i,6})'$ for the 6 tasks.
+
+**Priors.**  The priors were as follows: $\mu_j \sim \mbox{N}(70,100^2)$, $\lambda_{jm} \sim \mbox{N}(0,25^2)$, $\tau_j^2 \sim \mbox{Inverse-}\chi^2(1,200^2)$,  $\delta^2_j \sim \mbox{Inverse-}\chi^2(1,25^2)$, and $\alpha_{ij}\sim \mbox{N}(1000,1000^2)$.  
+
+**Implementation.** Chains were run for 5000 iterations with the first 500 serving as burn in. Factors were aligned with the @Poworoznek.etal.2021 post-sampling alignment algorithm.  Chains mixed well as in the preceding example, and the 4500 iterations were more than sufficient for consideration of posterior quantities.
+
+## Results
+
+Figure \ref{fig:enkaviCM}B shows the disattenuated correlation matrix from the model. The degree of disattenuation is sizable because there is a high degree of trial noise and relatively few trials [@Rouder.Mehrvarz.2024]. The largest disattenuated correlation value is .36, which is 50% larger than the observed value.  
+
+Figure \ref{fig:enkaviCM}C-F show the factor decomposition of this correlation matrix, and Figure \ref{fig:enkaviCM}G  shows the proportion of variance accounted for by each component.  Loadings are shown in Table \ref{tab:enkaviTab}.  With a few exceptions, factor loadings are fairly small in value.  Much of the variability is unique, and the factors themselves are difficult to interpret.  Factor 1 reflects the correlation between the Global-Local interference task and the Stroop task; Factor 2 reflects the correlation between Stroop and task-switching tasks, and Factor 3 does not have an obvious role.  In summary, the factor structure simply highlights a few idiosyncratic correlations that are greater in magnitude than the others.  There is no evidence for a general inhibition or cognitive control factor.  Figure \ref{fig:enkaviCM}H shows that correlation coefficients are not well localized.  In summary, there is little structure that can be identified perhaps because there is so much trial noise.  The hierarchical approach does well here not overstating confidence when there is much trial noise, and this facet is in contrast to the take-the-mean approach which results in high confidence on low values.
+
+```{r}
+dat=readRDS("enkavi6Task.Rds")
+m=tapply(dat$y,list(dat$sub,dat$task,dat$cond),mean,na.rm=T)
+score=m[,,2]-m[,,1]
+obsCor=cor(score)
+```
+
+```{r}
+source('facExtra.R')
+source('enkavi.R')
+# samples=fitEnkavi(dat,priorRT,numFactors=3)
+# saveRDS(file='enkaviMod.Rds',samples)
+# samples=readRDS('enkaviMod.Rds') #varimax
+
+if (file.exists("enkaviMod.Rds")) {
+  message("Loading existing model from file.")
+  samples = readRDS("enkaviMod.Rds")  # varimax
+} else {
+  message("File not found. Running model...")
+  samples = fitEnkavi(dat, priorRT, numFactors = 3)
+  saveRDS(samples, file = "enkaviMod.Rds")
+}
+
+eigMax=eigenMax(samples)
+stdVM=standardize(samples)
+stdEig=standardize(eigMax)
+```
+
+
+
+```{r enkaviCM,fig.cap="Results from cognitive control example.  A. Observed correlation matrix. B. Model-based correlation matrix.  C-F. Factor decomposition of the model-based correlation.  G. Posterior proportion of variance accounted for by each component.  H. Model-based correlations with 95% CIs.  Correlations are difficult to localize because of excessive trial noise.",fig.asp=1.3}
+source('enkavi.R')
+layout(matrix(nrow=3,ncol=3,1:9,
+              byrow=T))
+myCorPlot(obsCor,main="A. Observed")
+propVar=enkaviDecomp(stdEig)
+cm=apply(propVar,c(1,3,4),mean)
+myCorPlot(cm[1,,],main="B. Model")
+myCorPlot(cm[2,,],main="C. Factor 1")
+myCorPlot(cm[3,,],main="D. Factor 2")
+myCorPlot(cm[4,,],main="E. Factor 3")
+myCorPlot(cm[5,,],main="F. Residual")
+
+par(mar=c(4,4,1,1),mgp=c(2,1,0),cex=1)
+temp1=apply(propVar,1:2,function(x) sum(diag(x)))
+propVarPost=temp1[2:5,]/temp1[1,]
+plot(density(propVarPost[1,]),xlim=c(0,1),col=mycol[1],lwd=2
+     ,main="",xlab="Proportion of Variance")
+lines(density(propVarPost[2,]),col=mycol[2],lwd=2)
+lines(density(propVarPost[3,]),col=mycol[3],lwd=2)
+lines(density(propVarPost[4,]),col=mycol[4],lwd=2)
+mtext(side=3,adj=0,"G")
+
+par(mar=c(0,0,1,4))
+plot.new()
+legend("topleft",legend=c("Fac 1","Fac 2","Fac 3","Residual"),
+       lwd=2,col=mycol[1:4])
+par(mar=c(4,4,1,1))
+
+q=apply(stdEig$rho,2:3,quantile,p=c(.025,.5,.975))
+upperTri <- lapply(1:dim(q)[1], function(i) {
+  mat <- q[i, , ]
+  mat[upper.tri(mat)]  # Returns just the upper triangle values
+})
+
+
+med=upperTri[[2]]
+o=order(med)
+lo=upperTri[[1]]
+hi=upperTri[[3]]
+lim=c(min(lo,-.2),max(hi,.7))
+plot(med[o],ylim=lim,typ='n',axes=F,
+     ylab="Correlation  Value",xlab="Correlation Index")
+n=length(o)
+arrows(1:n,lo[o],1:n,hi[o],code=3,angle=90,length = .05)
+points(med[o],pch=21,bg='gold',cex=1)
+axis(1,at=c(1,n))
+axis(2)
+abline(h=0,lty=2)
+mtext(side=3,adj=0,"H")
+```
+
+
+```{r enkaviTab,results="as.is",eval=T}
+pLamEig=apply(eigMax$lambda,2:3,mean)
+longNames=c("Flanker","Global/Local","Negative Priming","Simon","Stroop","Task Switching")
+tab=cbind(longNames,round(pLamEig,0))
+colnames(tab)=c("Task","Factor 1 (ms)","Factor 2 (ms)","Factor 3 (ms)")
+apa_table(tab,
+          caption="Factor Loadings For EFA Model of Cognitive Control")
+```
+
+
+
+
+
+## Hierarchical Unconstrained-Variance Model
+
+Factor models provide constraint on covariance.  The smaller the number of factors, the larger the amount of constraint.  Figure \ref{fig:facSeries} shows how this constraint works.  Figure \ref{fig:facSeries}A is a one-factor constraint, that is, it the correlation when $\bfLambda$, factor loadings, are restricted to a single column.  The one-factor constraint is fairly stringent, and the resulting correlation matrix is limited in the number of patterns.  Figure \ref{fig:facSeries}B is the two-factor constraint, and because the model is more complex, more diversity in the correlation matrix may be seen.  In particular, stronger positive correlations and negative correlations are possible.  Figure \ref{fig:facSeries}C shows the three-factor constraint, and increasing dimensionality allows for more subtlety in the resulting correlation matrix.  
+
+In conventional manifest factor models, this series of increasing factor complexity has an obvious endpoint---the sample correlation or sample variance matrix.  Factor modeling, like PCA, is a way of approximating this sample correlation matrix with reduced dimensionality.  In the hierarchical factor model, the endpoint is $\bfSigma$, the covariance of $\bftheta_i$ across individuals: $\bfSigma=\bfLambda\bfLambda'+D(\bfdelta^2)$.  The right-hand side serves as constraint, especially if the number of columns in $\bfLambda$  is much smaller than the number of tasks $J$.  The problem is that $\bfSigma$ is not observed, in fact, it may not be obvious how to estimate it is without the factor constraint.  In the manifest version, we may check how well our factor solution approximates the sample variance matrix.  In the hierarchical model, the factor model itself does not provide this check.  
+
+Needed is a hierarchical model without the factor constraint so that we may visualize $\bfSigma$.  This need is met by placing diffuse priors on $\bfSigma$ that impart a minimal prior information.  Suitable choices are the inverse Wishart [@OHagan.Forster.2004], the LKJ prior [@Lewandowski.etal.2009], and the scaled inverse Wishart [@Huang.Wand.2013].  We have found that inverse Wishart is computationally convenient but must be tuned carefully imposing a burden on the analyst; the LKJ is computationally slow though more robust to prior settings [see @Yang.Rouder.2025]; and the scaled inverse Wishart is both computation convenient and robust to prior settings.  We specify the following hierarchical unconstrainted variance model:
+$$
+\begin{aligned}
+\bftheta_{i} \mid \bfSigma &\sim \mbox{N}(\bfmu,\bfSigma)\\
+\bfSigma &\sim \mbox{Scaled Inverse Wishart}(\bfS,v).
+\end{aligned}
+$$
+
+The scaled inverse Wishart has two settings, a scale vector $\bfS$, and a degrees-of-freedom setting $v$.  It is easiest to understand the role of these two settings through the decomposition $\bfSigma=D(\bfsigma)\bfrho D(\bfsigma)$.  The degrees-of-freedom parameter $v$ is a prior on correlation matrix $\bfrho$, and greater values of $v$ correspond to more mass near zero.  At $v=2$, the marginal prior on each correlation is uniformly distributed, and this is why we used this value throughout.  The scale parameter $S$ affects only $\bfsigma$, the standard deviation, and not $\bfrho$, the correlation matrix of interest.  Hence, it's setting is far less influential on the posterior values of correlation.  For the cognitive control data set, we set each element $S_j$ to 40 ms, a reasonable standard deviation on $\theta_{ij}$ for this set.   
+
+Figure \ref{fig:facSeries}D shows the correlation matrix for the unconstrained-variance model.  It differs modestly from the three factor model indicating that there is still a small degree of outstanding variance.  Given that the factors account for a small degree of variance and are essentially uninterpretable, we are not so concerned about additional variation beyond the three-factor solution.  In applications where correlations are more salient and factor structures are more interpretable, it may be substantively important to use the unconstrained-variance model as a catch-all to understand the factor-model approximation.
+
+```{r}
+source('enkavi.R')
+dat=readRDS("enkavi6Task.Rds")
+J= length(unique(dat$task))
+priorCov=list(
+  "mu.m"=70,
+  "mu.s"=100,
+  "alpha.m"=1000,
+  "alpha.s"=1000,
+  "tau.s"=200,
+  "S"=rep(40,J)
+)
+
+#samplesCov=fitEnkaviCov(dat=dat,prior=priorCov)
+#saveRDS(file="enkaviCov.Rds",samplesCov)
+# samplesCov=readRDS("enkaviCov.Rds")
+
+if (file.exists("enkaviCov.Rds")) {
+  message("Loading existing model from file.")
+  samplesCov = readRDS("enkaviCov.Rds")
+} else {
+  message("File not found. Running model...")
+  samplesCov = fitEnkaviCov(dat = dat, prior = priorCov)
+  saveRDS(samplesCov, file = "enkaviCov.Rds")
+}
+
+rho=samplesCov$Sigma
+M=dim(rho)[1]
+for (m in 1:M) rho[m,,]=cov2cor(solve(samplesCov$Sigma[m,,]))
+source('enkavi.R')
+#saveRDS(file="enkavi1F.Rds",fitEnkavi(dat,priorRT,1))
+#saveRDS(file="enkavi2F.Rds",fitEnkavi(dat,priorRT,2))
+# std1F=standardize(readRDS('enkavi1F.Rds'))
+# std2F=standardize(readRDS('enkavi2F.Rds'))
+
+
+if (file.exists("enkavi1F.Rds")) {
+  message("Loading 1-factor model.")
+  std1F = standardize(readRDS("enkavi1F.Rds"))
+} else {
+  message("Running 1-factor model...")
+  fit1F = fitEnkavi(dat, priorRT, 1)
+  saveRDS(fit1F, file = "enkavi1F.Rds")
+  std1F = standardize(fit1F)
+}
+
+if (file.exists("enkavi2F.Rds")) {
+  message("Loading 2-factor model.")
+  std2F = standardize(readRDS("enkavi2F.Rds"))
+} else {
+  message("Running 2-factor model...")
+  fit2F = fitEnkavi(dat, priorRT, 2)
+  saveRDS(fit2F, file = "enkavi2F.Rds")
+  std2F = standardize(fit2F)
+}
+
+```
+
+```{r facSeries, fig.cap="Factor approximation of a correlation matrix.  In the hierarchical model, the matrix being approximated may be estimated with an unconstrained prior on covariance.", fig.asp=.3}
+par(mfrow=c(1,4))
+myCorPlot(apply(std1F$rho,2:3,mean),main="A. One Factor")
+myCorPlot(apply(std2F$rho,2:3,mean),main="B. Two Factor")
+myCorPlot(apply(stdEig$rho,2:3,mean),main="C. Three Factor")
+myCorPlot(apply(rho,2:3,mean),main="D. Unconstrainted")
+```
+
+
+# Influence of Prior Specification
+
+Bayesian analysts need be aware of the role of arbitrary choices in model and prior specifications.  In the hierarchical set up, the factor model (\ref{facMod}) serves as a prior on $\bftheta$ in the data model (\ref{datMod}).  The factor model regularizes estimation of the correlations of these latent scores across tasks.  For example, the data model itself could be easily estimated with noninformative priors on $\bftheta_{ij}$, albeit the posterior means would exactly match the take-the-mean aggregate, correlations would be dramatically attenuated; and factors would be less salient.  The factor structure on $\bftheta_i$ is a form of regularization to a specific structure that is interpretable.  In this sense, posteriors need to be *appropriately* sensitive to prior specification rather than completely insensitive.   Regularization almost always involves making a few choices and tuning a few parameters, and a good example of this tuning is in Lasso and ridge regression.  Here, prior specification is a way of tuning regularization.
+
+We have explored the influence of various prior settings.  The most important element of prior setting is the scale of factor loadings relative to the scale of residual variation.  In the illusions application, we had scaled the data by the trial noise, and used scales of 1.0 on factor loadings and residual variances, that is $c_j=d_j=1$.  In the cognitive control application, we used the meta-analysis by @Haaf.etal.2024 to set $c_j=d_j=25$ ms.  In both cases, the ratio between $c_j$ and $d_j$ is 1-to-1.  As it turns out, it is this ratio that is important in controlling regularization as it is the ratio of structure to residual.  To understand the influence of this ratio, we created alternative prior ratios of 4-to-1 and 1-to-4 in addition to the 1-to-1 ratio used earlier.  Figure \ref{fig:prior} shows the resulting posteriors on the proportion of variance accounted for by the factor structure $\bfLambda\bfLambda'$ relative to $\bfSigma$.  As can be seen, the posterior is dependent on this prior ratio.  
+
+Two points emerge:  First, the influence of prior settings on the ratio is a function of the quality of the data.  The data are of higher quality in the visual illusion set than in the cognitive control set  inasmuch as there is far less trial noise and latent correlations are better localized.  Because the data have higher quality in the visual illusion set, the posterior is less sensitive to the prior ratio than it is in the cognitive control set.  Second, the ratio tunes the degree of regularization---the greater the ratio the greater the salience of the factor structure.  Tuning parameters are part of most regularization approaches, and these parameters must be set not only in hierarchical modeling but in other methods as well such as lasso and ridge regression.  The Bayesian hierarchical factor model is no different than other methods in this regard.  
+
+Overall, we think the 1-to-1 ratio serves as a reasonable default for many applications.  That said, researchers are encouraged to explore how reasonable variations in this ratio affect their results.  Understanding this sensitivity provides researchers with context for drawing conclusions.
+
+
+```{r}
+dat=readRDS("enkavi6Task.Rds")
+priorRTa=list(
+    "mu.m"=70,
+    "mu.s"=100,
+    "alpha.m"=1000,
+    "alpha.s"=1000,
+    "tuneDelta"=40,
+    "tuneLambda"=10,
+    "tuneTau"=200)
+priorRTb=list(
+    "mu.m"=70,
+    "mu.s"=100,
+    "alpha.m"=1000,
+    "alpha.s"=1000,
+    "tuneDelta"=10,
+    "tuneLambda"=40,
+    "tuneTau"=200)
+#saveRDS(file="enkaviPriorA.Rds",
+#        fitEnkavi(dat,priorRTa,numFactors=3))
+#saveRDS(file="enkaviPriorB.Rds",
+#        fitEnkavi(dat,priorRTb,numFactors=3))
+
+# e=list()
+# e$base=standardize(readRDS('enkaviMod.Rds'))
+# e$a=standardize(readRDS('enkaviPriorA.Rds'))
+# e$b=standardize(readRDS('enkaviPriorB.Rds'))
+
+
+# runwrapper_enkaviPriors.R
+
+e = list()
+
+# Base model
+if (file.exists("enkaviMod.Rds")) {
+  message("Loading base model.")
+  e$base = standardize(readRDS("enkaviMod.Rds"))
+} else {
+  message("Running base model...")
+  fitBase = fitEnkavi(dat, priorRT, numFactors = 3)
+  saveRDS(fitBase, file = "enkaviMod.Rds")
+  e$base = standardize(fitBase)
+}
+
+# Prior A
+if (file.exists("enkaviPriorA.Rds")) {
+  message("Loading prior A model.")
+  e$a = standardize(readRDS("enkaviPriorA.Rds"))
+} else {
+  message("Running prior A model...")
+  fitA = fitEnkavi(dat, priorRTa, numFactors = 3)
+  saveRDS(fitA, file = "enkaviPriorA.Rds")
+  e$a = standardize(fitA)
+}
+
+# Prior B
+if (file.exists("enkaviPriorB.Rds")) {
+  message("Loading prior B model.")
+  e$b = standardize(readRDS("enkaviPriorB.Rds"))
+} else {
+  message("Running prior B model...")
+  fitB = fitEnkavi(dat, priorRTb, numFactors = 3)
+  saveRDS(fitB, file = "enkaviPriorB.Rds")
+  e$b = standardize(fitB)
+}
+
+```
+
+```{r}
+source('iBat5.R')
+dat=loadiBat5('iBat5.csv')
+
+priorIlla=priorIllb=priorIll
+priorIlla$tuneLambda=.5
+priorIlla$tuneDelta=2
+priorIllb$tuneLambda=2
+priorIllb$tuneDelta=.5
+#saveRDS(file="iBat5PriorA.Rds",
+#        fitiBat5(dat,priorIlla))
+#saveRDS(file="iBat5PriorB.Rds",
+#        fitiBat5(dat,priorIllb))
+
+
+# v=list()
+# v$base=standardize(readRDS("iBat5.Rds"))
+# v$a=standardize(readRDS("iBat5PriorA.Rds"))
+# v$b=standardize(readRDS("iBat5PriorB.Rds"))
+
+
+# runwrapper_iBat5Priors.R
+
+v = list()
+
+# Base model
+if (file.exists("iBat5.Rds")) {
+  message("Loading base model.")
+  v$base = standardize(readRDS("iBat5.Rds"))
+} else {
+  message("Running base model...")
+  fitBase = fitiBat5(dat, priorIll)
+  saveRDS(fitBase, file = "iBat5.Rds")
+  v$base = standardize(fitBase)
+}
+
+# Prior A
+if (file.exists("iBat5PriorA.Rds")) {
+  message("Loading prior A model.")
+  v$a = standardize(readRDS("iBat5PriorA.Rds"))
+} else {
+  message("Running prior A model...")
+  fitA = fitiBat5(dat, priorIlla)
+  saveRDS(fitA, file = "iBat5PriorA.Rds")
+  v$a = standardize(fitA)
+}
+
+# Prior B
+if (file.exists("iBat5PriorB.Rds")) {
+  message("Loading prior B model.")
+  v$b = standardize(readRDS("iBat5PriorB.Rds"))
+} else {
+  message("Running prior B model...")
+  fitB = fitiBat5(dat, priorIllb)
+  saveRDS(fitB, file = "iBat5PriorB.Rds")
+  v$b = standardize(fitB)
+}
+
+```
+
+```{r}
+makeVarProp=function(samples){
+  M=dim(samples$lambda)[1]
+  structure=1:M
+  for (m in 1:M) structure[m]=sum(diag(crossprod(t(samples$lambda[m,,]))))
+  return(structure)
+}
+
+structureV=sapply(v,makeVarProp)/10
+structureE=sapply(e,makeVarProp)/6
+  
+
+```
+
+```{r prior, fig.cap="Effect of prior settings on loadings $(c_j)$ and residuals $(d_j)$  on the proportion of variance accounted for by the factor structure.  The effect enters as the ratio $c_j/d_j$.  A. Visual illusion data set.  The three curves correspond to ratios 1-to-4, 1-to-1, and 4-to-1.  B. Cognitive control data set.  The three curves correspond to the same three ratios."}
+
+plotVar=function(structure){
+  a1=density(structure[,1])
+  a2=density(structure[,2])
+  a3=density(structure[,3])
+  top=max(a1$y,a2$y,a3$y)
+  
+  plot(a2,xlim=c(-.05,1.05),ylim=c(0,top),main="",xlab="Proportion of Variance\n From Factor Structure",col='darkblue',lwd=2)
+  lines(a1,lwd=2)
+  lines(a3,col='darkgreen',lwd=2)}
+
+par(mfrow=c(1,2),mar=c(4,4,1,1))
+par(mgp=c(3,1,0))
+plotVar(structureV)
+mtext(side=3,adj=0,"A",cex=1.2)
+plotVar(structureE)
+par(xpd=NA)
+legend(.5,7.6,legend=c("1-to-4","1-to-1","4-to-1"),
+       col=c("darkblue","black","darkgreen"),lwd=2,
+       title = expression(paste("Ratio: ", c[j] / d[j])),
+       bg="white")
+mtext(side=3,adj=0,"B",cex=1.2)
+```
+
+
+
+
+# Discussion
+
+Factor models were developed in psychology to explore the covariation in survey data.  Each individual provides responses to a number of items, and the covariation in the matrix of responses is decomposed into factors.  Data from experiments however differ from survey data in two important regards:  First, data from experiments are comprised of repeated trials nested within people, tasks, and conditions.  This is an advantage as the variation across replicate trials may be accounted, which in turn, perhaps allows for more precise understanding of the covariation across individuals, conditions, and tasks.  Second, data from experiments is often far more noise prone than survey data.  In a typical response-time task, for example, one is trying to localize some 25 ms of variation across individuals in an effect whereas each trial adds some 200 ms of residual variability.  In realistic designs, this degree of trial noise tends to lead to attenuation of correlations---observed correlations are about one-half of true values [@Rouder.etal.2023a;@Haaf.etal.2024].  Moreover, subsequent latent-variable analyses, trial noise diminishes the salience of the latent variables themselves.  In turn, this diminished saliency makes it more difficult to understand the structure in these latent variables.  Several authors have noted the appeal of Bayesian hierarchical models to disattenuate these correlations and recover patterns of covariation [@Matzke.etal.2017;@Rouder.Haaf.2019;@Haines.etal.2025].  Here we show that a simple data model of trial noise may be yoked with factor models to reveal the salience of underlying latent variables.  There are a few technical challenges; fortunately, new computationally-convenient tools now exist to meet them.
+
+## Limitations and Future Directions
+
+**Model Comparison.**  Perhaps the most obvious limitation of the hierarchical factor models developed here is the lack of a formal mechanism for inference on structure.  Needed is a way of comparing different models and stating evidence for various dimensional constraints.   In frequentist factor-model analysis, model comparison formally occurs through AIC and BIC fit statistics [@Vrieze.2012] as well as through considerations of eigenvalues [@Kaiser.1960;@Preacher.MacCallum.2003].  Model comparison in Bayesian analysis remains a contested topic with strong opinions about the utility of Bayes factors and posterior-predictive methods [@Morey.etal.2016;@Vanpaemel.2010;@Vehtari.etal.2017].  The Bayesian model comparison development from statistics has traditionally centered on Bayes factors [@Jeffreys.1961;@Kass.Raftery.1995], though we suspect it may not be too difficult to implement WAIC comparisons [@Vehtari.etal.2017].  Here, we discuss current developments with Bayes factors.
+
+Bayes factor computations with nonhierarchical factor models have followed two related paths called here the *separate specification* approach and the *encompassing* approach.  The separate specification approach is to (i) specify separate, competing models each with a different dimensionality, and (ii) compare them through marginal likelihood computations.  Traditionally, this approach has not proven popular for factor models.  We suspect it is because much development of factor models in the statistics and computer science literature is designed to address high-dimensional problems such as those in genetics and image processing.  In high-dimensional spaces, the number of possible models and possible model comparisons is unwieldy.  Instead, the encompassing approach is used.   Here there is a single, maximal model.  Dimensions are then adaptively eliminated in analysis if they are not supported by the data.  The encompassing approach is in the spirit of Lasso regularization where penalties are used to eliminate dimensions that have little support from the data [e.g., @Jiang.etal.2016].  Examples of this encompassing approach for latent variables include automatic-relevance-detection priors [@MacKay.1992], spike-and-slab priors [@Oh.Kim.2010], and multiplicative gamma priors [@Bhattacharya.Dunson.2011].  
+
+Factor model analysis in psychology often comprises just a few dimensions or factors.  In the current applications in cognition, one hopes to discriminate among a handful of possible factors.  Even in the most advanced applications in say personality and intelligence, the dimensionality of the problem is limited.  For these applications, we suspect the separate-specification approach will be appropriate and convenient.  Computing marginal likelihoods (Bayes factors) is often computationally involved [@Kass.1993].  Fortunately, Bayesian analysts have a well-stocked toolbox of computational approaches including Lapace approximation [@Shun.McCullagh.1995], importance sampling [@Sinharay.Stern.2005], and bridge sampling [@Meng.Wong.1996;@Gronau.etal.2017].  And many authors have used a variety of techniques to estimate Bayes factors in factor models including @Geweke.Zhou.1996, @Lopes.West.2004, and @Pitt.etal.2006.  Most recently, @Schnuerch.etal.2025 provide an easy-to-use bridge-sampling Bayes-factor solution for manifest factor models.  How well any of these approaches work in hierarchical-factor-model settings is a topic for future research.
+
+
+**Realistic Psychological-Process Models.**  The data model here are linear models.  Although linear models are a workhorse of statistical analysis, they rarely serve as insightful models of mental processes.  Over the last 60 years, researchers have proposed nonlinear accounts of mental processes, and popular model classes include multinomial tree models [@Riefer.Batchelder.1988], evidence accumulation models [@Ratcliff.Rouder.1998;@Vickers.Smith.1985], race models [@Logan.1988;@Brown.Heathcote.2008], and information gating models [@Townsend.Ashby.1982;@Frank.2005].  And in the last twenty years, it has become increasingly common to develop hierarchical versions of these process models that account for trial noise as well as variation across individuals [@Vandekerckhove.etal.2011;@Rouder.etal.2015;@Heck.etal.2018].
+
+There has been notable progress in combining latent variable models with cognitive process models.  One of the early demonstrations comes from @Vandekerckhove.2014 who used a factor decomposition of accumulation-rate parameters in the diffusion model of perception [@Ratcliff.McKoon.2008].  To simplify analysis, Vandekerckhove used an algebraic decomposition rather than a stochastic one---drift rates were assumed to be the product of factor loadings and factor scores without any additional residual variation.  Turner and colleagues [@Kang.etal.2022;@Turner.etal.2017] develop hierarchical factor models much like those presented here for diffusion model parameters as a way of linking fMRI activation with behavior.  The factor models in their work serve as a regularization device in localizing brain-behavior links.  Most recently, @Stevenson.etal.2024b provide a general hierarchical factor model solution for process models such as the diffusion model.  Stevenson et al. focus on the factor structure in drift rates. @Rouder.2025 provides a different example---he integrates a factor model with a psychophysical model to assess the factor structure of thresholds.  It is a matter for future research to compare the pragmatic differences in choosing a process model, as done by @Stevenson.etal.2024b and @Rouder.2025, to the more generic and easier-to-analyze linear models used here.
+
+
+\newpage
+
+# References
+
